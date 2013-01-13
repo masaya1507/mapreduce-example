@@ -1,0 +1,258 @@
+CHAPTER 4 JPA Repositories
+￼The Java Persistence API (JPA) is the standard way of persisting Java objects into rela- tional databases. The JPA consists of two parts: a mapping subsystem to map classes onto relational tables as well as an EntityManager API to access the objects, define and execute queries, and more. JPA abstracts a variety of implementations such as Hiber- nate, EclipseLink, OpenJpa, and others. The Spring Framework has always offered sophisticated support for JPA to ease repository implementations. The support consists of helper classes to set up an EntityManagerFactory, integrate with the Spring transac- tion abstraction, and translate JPA-specific exceptions into Spring’s DataAccessExcep tion hierarchy.
+The Spring Data JPA module implements the Spring Data Commons repository ab- straction to ease the repository implementations even more, making a manual imple- mentation of a repository obsolete in most cases. For a general introduction to the repository abstraction, see Chapter 2. This chapter will take you on a guided tour through the general setup and features of the module.
+The Sample Project
+Our sample project for this chapter consists of three packages: the com.oreilly.spring- data.jpa base package plus a core and an order subpackage. The base package contains a Spring JavaConfig class to configure the Spring container using a plain Java class instead of XML. The two other packages contain our domain classes and repository interfaces. As the name suggests, the core package contains the very basic abstractions of the domain model: technical helper classes like AbstractEntity, but also domain concepts like an EmailAddress, an Address, a Customer, and a Product. Next, we have the orders package, which implements actual order concepts built on top of the foun- dational ones. So we’ll find the Order and its LineItems here. We will have a closer look at each of these classes in the following paragraphs, outlining their purpose and the way they are mapped onto the database using JPA mapping annotations.
+￼￼37
+The very core base class of all entities in our domain model is AbstractEntity (see Example 4-1). It’s annotated with @MappedSuperclass to express that it is not a managed entity class on its own but rather will be extended by entity classes. We declare an id of type Long here and instruct the persistence provider to automatically select the most appropriate strategy for autogeneration of primary keys. Beyond that, we implement equals(...) and hashCode() by inspecting the id property so that entity classes of the same type with the same id are considered equal. This class contains the main technical artifacts to persist an entity so that we can concentrate on the actual domain properties in the concrete entity classes.
+Example 4-1. The AbstractEntity class
+@MappedSuperclass
+public class AbstractEntity {
+@Id
+@GeneratedValue(strategy = GenerationType.AUTO) private Long id;
+@Override
+public boolean equals(Object obj) { ... }
+@Override
+public int hashCode() { ... } }
+Let’s proceed with the very simple Address domain class. As Example 5-2 shows, it is a plain @Entity annotated class and simply consists of three String properties. Because they’re all basic ones, no additional annotations are needed, and the persistence pro- vider will automatically map them into table columns. If there were demand to cus- tomize the names of the columns to which the properties would be persisted, you could use the @Column annotation.
+Example 4-2. The Address domain class
+@Entity
+public class Address extends AbstractEntity {
+private String street, city, country; }
+The Addresses are referred to by the Customer entity. Customer contains quite a few other properties (e.g., the primitive ones firstname and lastname). They are mapped just like the properties of Address that we have just seen. Every Customer also has an email ad- dress represented through the EmailAddress class (see Example 4-3).
+Example 4-3. The EmailAddress domain class
+@Embeddable
+public class EmailAddress {
+￼￼38 | Chapter 4: JPA Repositories
+private static final String EMAIL_REGEX = ...;
+private static final Pattern PATTERN = Pattern.compile(EMAIL_REGEX);
+@Column(name = "email") private String emailAddress;
+public EmailAddress(String emailAddress) { Assert.isTrue(isValid(emailAddress), "Invalid email address!");
+this.emailAddress = emailAddress; }
+protected EmailAddress() { }
+public boolean isValid(String candidate) {
+return PATTERN.matcher(candidate).matches(); }
+}
+This class is a value object, as defined in Eric Evans’s book Domain Driven Design [Evans03]. Value objects are usually used to express domain concepts that you would naively implement as a primitive type (a string in this case) but that allow implementing domain constraints inside the value object. Email addresses have to adhere to a specific format; otherwise, they are not valid email addresses. So we actually implement the format check through some regular expression and thus prevent an EmailAddress in- stance from being instantiated if it’s invalid.
+This means that we can be sure to have a valid email address if we deal with an instance of that type, and we don’t have to have some component validate it for us. In terms of persistence mapping, the EmailAddress class is an @Embeddable, which will cause the persistence provider to flatten out all properties of it into the table of the surrounding class. In our case, it’s just a single column for which we define a custom name: email.
+As you can see, we need to provide an empty constructor for the JPA persistence pro- vider to be able to instantiate EmailAddress objects via reflection (Example 5-4). This is a significant shortcoming because you effectively cannot make the emailAddress a final one or assert make sure it is not null. The Spring Data mapping subsystem used for the NoSQL store implementations does not impose that need onto the developer. Have a look at “The Mapping Subsystem” on page 83 to see how a stricter imple- mentation of the value object can be modeled in MongoDB, for example.
+Example 4-4. The Customer domain class
+@Entity
+public class Customer extends AbstractEntity{ private String firstname, lastname;
+@Column(unique = true)
+private EmailAddress emailAddress;
+￼￼The Sample Project
+| 39
+@OneToMany(cascade = CascadeType.ALL, orphanRemoval = true) @JoinColumn(name = "customer_id")
+private Set<Address> addresses;
+}
+We use the @Column annotation on the email address to make sure a single email address cannot be used by multiple customers so that we are able to look up customers uniquely by their email address. Finally we declare the Customer having a set of Addresses. This property deserves deeper attention, as there are quite a few things we define here.
+First, and in general, we use the @OneToMany annotation to specify that one Customer can have multiple Addresses. Inside this annotation, we set the cascade type to Cascade Type.ALL and also activate orphan removal for the addresses. This has a few conse- quences. For example, whenever we initially persist, update, or delete a customer, the Addresses will be persisted, updated, or deleted as well. Thus, we don’t have to persist an Address instance up front or take care of removing all Addresses whenever we delete a Customer; the persistence provider will take care of that. Note that this is not a database-level cascade but rather a cascade managed by your JPA persistence provider. Beyond that, setting the orphan removal flag to true will take care of deleting Addresses from that database if they are removed from the collection.
+All this results in the Address life cycle being controlled by the Customer, which makes the relationship a classical composition. Plus, in domain-driven design (DDD) termi- nology, the Customer qualifies as aggregate root because it controls persistence opera- tions and constraints for itself as well as other entities. Finally, we use @JoinColumn with the addresses property, which causes the persistence provider to add another column to the table backing the Address object. This additional column will then be used to refer to the Customer to allow joining the tables. If we had left out the additional anno- tation, the persistence provider would have created a dedicated join table.
+The final piece of our core package is the Product (Example 4-5). Just as with the other classes discussed, it contains a variety of basic properties, so we don’t need to add annotations to get them mapped by the persistence provider. We add only the @Column annotation to define the name and price as mandatory properties. Beyond that, we add a Map to store additional attributes that might differ from Product to Product.
+Example 4-5. The Product domain class
+@Entity
+public class Product extends AbstractEntity {
+@Column(nullable = false) private String name; private String description;
+@Column(nullable = false) private BigDecimal price;
+￼￼40 | Chapter 4: JPA Repositories
+@ElementCollection
+private Map<String, String> attributes = new HashMap<String, String>(); }
+Now we have everything in place to build a basic customer relation management (CRM) or inventory system. Next, we’re going to add abstractions that allow us to implement orders for Products held in the system. First, we introduce a LineItem that captures a reference to a Product alongside the amount of products as well as the price at which the product was bought. We map the Product property using a @ManyToOne annotation that will actually be turned into a product_id column in the LineItem table pointing to the Product (see Example 4-6).
+Example 4-6. The LineItem domain class
+@Entity
+public class LineItem extends AbstractEntity { @ManyToOne
+private Product product;
+@Column(nullable = false) private BigDecimal price; private int amount;
+}
+The final piece to complete the jigsaw puzzle is the Order entity, which is basically a pointer to a Customer, a shipping Address, a billing Address, and the LineItems actually ordered (Example 4-7). The mapping of the line items is the very same as we already saw with Customer and Address. The Order will automatically cascade persistence op- erations to the LineItem instances. Thus, we don’t have to manage the persistence life cycle of the LineItems separately. All other properties are many-to-one relationships to concepts already introduced. Note that we define a custom table name to be used for Orders because Order itself is a reserved keyword in most databases; thus, the generated SQL to create the table as well as all SQL generated for queries and data manipulation would cause exceptions when executing.
+Example 4-7. The Order domain class
+@Entity
+@Table(name = "Orders")
+public class Order extends AbstractEntity {
+@ManyToOne(optional = false) private Customer customer; @ManyToOne
+private Address billingAddress;
+@ManyToOne(optional = false, cascade = CascadeType.ALL) private Address shippingAddress;
+￼￼The Sample Project
+| 41
+@OneToMany(cascade = CascadeType.ALL, orphanRemoval = true) @JoinColumn(name = "order_id")
+private Set<LineItem>;
+...
+public Order(Customer customer, Address shippingAddress, Address billingAddress) {
+Assert.notNull(customer); Assert.notNull(shippingAddress);
+this.customer = customer;
+this.shippingAddress = shippingAddress.getCopy(); this.billingAddress = billingAddress == null ? null :
+billingAddress.getCopy(); }
+}
+A final aspect worth noting is that the constructor of the Order class does a defensive copy of the shipping and billing address. This is to ensure that changes to the Address instance handed into the method do not propagate into already existing orders. If we didn’t create the copy, a customer changing her Address data later on would also change the Address on all of her Orders made to that Address as well.
+The Traditional Approach
+Before we start, let’s look at how Spring Data helps us implement the data access layer for our domain model, and discuss how we’d implement the data access layer the tra- ditional way. You’ll find the sample implementation and client in the sample project annotated with additional annotations like @Profile (for the implementation) as well as @ActiveProfile (in the test case). This is because the Spring Data repositories ap- proach will create an instance for the CustomerRepository, and we’ll have one created for our manual implementation as well. Thus, we use the Spring profiles mechanism to bootstrap the traditional implementation for only the single test case. We don’t show these annotations in the sample code because they would not have actually been used if you implemented the entire data access layer the traditional way.
+To persist the previously shown entities using plain JPA, we now create an interface and implementation for our repositories, as shown in Example 4-8.
+Example 4-8. Repository interface definition for Customers
+public interface CustomerRepository { Customer save(Customer account);
+Customer findByEmailAddress(EmailAddress emailAddress); }
+￼￼42 | Chapter 4: JPA Repositories
+So we declare a method save(...) to be able to store accounts, and a query method to find all accounts that are assigned to a given customer by his email address. Let’s see what an implementation of this repository would look like if we implemented it on top of plain JPA (Example 4-9).
+Example 4-9. Traditional repository implementation for Customers
+@Repository
+@Transactional(readOnly = true)
+class JpaCustomerRepository implements CustomerRepository {
+@PersistenceContext
+private EntityManager em;
+@Override
+@Transactional
+public Customer save(Customer customer) {
+if (customer.getId() == null) { em.persist(customer);
+return customer;
+} else {
+return em.merge(customer); }
+}
+@Override
+public Customer findByEmailAddress(EmailAddress emailAddress) {
+TypedQuery<Customer> query = em.createQuery(
+"select c from Customer c where c.emailAddress = :emailAddress", Customer.class);
+query.setParameter("emailAddress", emailAddress); return query.getSingleResult();
+} }
+The implementation class uses a JPA EntityManager, which will get injected by the Spring container due to the JPA @PersistenceContext annotation. The class is annotated with @Repository to enable exception translation from JPA exceptions to Spring’s Data AccessException hierarchy. Beyond that, we use @Transactional to make sure the save(...) operation is running in a transaction and to allow setting the readOnly flag (at the class level) for findByEmailAddress(...). This helps optimize performance inside the persistence provider as well as on the database level.
+Because we want to free the clients from the decision of whether to call merge(...) or persist(...) on the EntityManager, we use the id field of the Customer to specify whether we consider a Customer object as new or not. This logic could, of course, be extracted into a common repository superclass, as we probably don’t want to repeat this code for every domain object–specific repository implementation. The query method is quite straightforward as well: we create a query, bind a parameter, and execute the query to
+￼￼The Traditional Approach | 43
+get a result. It’s almost so straightforward that you could regard the implementation code as boilerplate. With a little bit of imagination, we can derive an implementation from the method signature: we expect a single customer, the query is quite close to the method name, and we simply bind the method parameter to it. So, as you can see, there’s room for improvement.
+Bootstrapping the Sample Code
+We now have our application components in place, so let’s get them up and running inside a Spring container. To do so, we have to do two things: first, we need to configure the general JPA infrastructure (i.e., a DataSource connecting to a database as well as a JPA EntityManagerFactory). For the former we will use HSQL, a database that supports being run in-memory. For the latter we will choose Hibernate as the persistence pro- vider. You can find the dependency setup in the pom.xml file of the sample project. Second, we need to set up the Spring container to pick up our repository implementa- tion and create a bean instance for it. In Example 4-10, you see a Spring JavaConfig configuration class that will achieve the steps just described.
+Example 4-10. Spring JavaConfig configuration
+@Configuration @ComponentScan @EnableTransactionManagement class ApplicationConfig {
+@Bean
+public DataSource dataSource() {
+EmbeddedDatabaseBuilder builder = new EmbeddedDatabaseBuilder();
+return builder.setType(EmbeddedDatabaseType.HSQL).build(); }
+@Bean
+public LocalContainerEntityManagerFactoryBean entityManagerFactory() {
+HibernateJpaVendorAdapter vendorAdapter = new HibernateJpaVendorAdapter(); vendorAdapter.setDatabase(Database.HSQL); vendorAdapter.setGenerateDdl(true);
+LocalContainerEntityManagerFactoryBean factory = new LocalContainerEntityManagerFactoryBean();
+factory.setJpaVendorAdapter(vendorAdapter); factory.setPackagesToScan(getClass().getPackage().getName()); factory.setDataSource(dataSource());
+return factory; }
+@Bean
+public PlatformTransactionManager transactionManager() { JpaTransactionManager txManager = new JpaTransactionManager(); txManager.setEntityManagerFactory(entityManagerFactory());
+￼￼44
+| Chapter 4: JPA Repositories
+return txManager; }
+}
+The @Configuration annotation declares the class as a Spring JavaConfig configuration class. The @ComponentScan instructs Spring to scan the package of the ApplicationCon fig class and all of its subpackages for Spring components (classes annotated with @Service, @Repository, etc.). @EnableTransactionManagement activates Spring-managed transactions at methods annotated with @Transactional.
+The methods annotated with @Bean now declare the following infrastructure compo- nents: dataSource() sets up an embedded data source using Spring’s embedded data- base support. This allows you to easily set up various in-memory databases for testing purposes with almost no configuration effort. We choose HSQL here (other options are H2 and Derby). On top of that, we configure an EntityManagerFactory. We use a new Spring 3.1 feature that allows us to completely abstain from creating a persis- tence.xml file to declare the entity classes. Instead, we use Spring’s classpath scanning feature through the packagesToScan property of the LocalContainerEntityManagerFac toryBean. This will trigger Spring to scan for classes annotated with @Entity and @Map pedSuperclass and automatically add those to the JPA PersistenceUnit.
+The same configuration defined in XML looks something like Example 4-11. Example 4-11. XML-based Spring configuration
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:context="http://www.springframework.org/schema/context" xmlns:tx="http://www.springframework.org/schema/tx" xmlns:jdbc="http://www.springframework.org/schema/jdbc" xsi:schemaLocation="http://www.springframework.org/schema/beans
+http://www.springframework.org/schema/beans/spring-beans.xsd http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx.xsd http://www.springframework.org/schema/jdbc http://www.springframework.org/schema/jdbc/spring-jdbc.xsd">
+<context:componen-scan base-package="com.oreilly.springdata.jpa" />
+<tx:annotation-driven />
+<bean id="transactionManager" class="org.springframework.orm.jpa.JpaTransactionManager"> <property name="entityManagerFactory" ref="entityManagerFactory" />
+</bean>
+<bean id="entityManagerFactory" class="org.springframework.orm.jpa.LocalContainerEntityManagerFactoryBean">
+<property name="dataSource" ref="dataSource" />
+<property name="packagesToScan" value="com.oreilly.springdata.jpa" />
+￼￼Bootstrapping the Sample Code
+| 45
+<property name="jpaVendorAdapter">
+<bean class="org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter">
+<property name="database" value="HSQL" />
+<property name="generateDdl" value="true" /> </bean>
+</property> </bean>
+<jdbc:embedded-database id="dataSource" type="HSQL" /> </beans>
+The <jdbc:embedded-database /> at the very bottom of this example creates the in- memory Datasource using HSQL. The declaration of the LocalContainerEntityManager FactoryBean is analogous to the declaration in code we’ve just seen in the JavaConfig case (Example 4-10). On top of that, we declare the JpaTransactionManager and finally activate annotation-based transaction configuration and component scanning for our base package. Note that the XML configuration in Example 4-11 is slightly different from the one you’ll find in the META-INF/spring/application-context.xml file of the sample project. This is because the sample code is targeting the Spring Data JPA-based data access layer implementation, which renders some of the configuration just shown obsolete.
+The sample application class creates an instance of an AnnotationConfigApplication Context, which takes a Spring JavaConfig configuration class to bootstrap application components (Example 4-12). This will cause the infrastructure components declared in our ApplicationConfig configuration class and our annotated repository implemen- tation to be discovered and instantiated. Thus, we can access a Spring bean of type CustomerRepository, create a customer, store it, and look it up by its email address.
+Example 4-12. Bootstrapping the sample code
+@RunWith(SpringJunit4ClassRunner.class) @ContextConfiguration(classes = ApplicationConfig.class) class CustomerRepositoryIntegrationTests {
+@Autowired
+CustomerRepository customerRepository; @Test
+public void savesAndFindsCustomerByEmailAddress { Customer dave = new Customer("Dave", "Matthews");
+dave.setEmailAddress("dave@dmband.com"); Customer result = repository.save(dave);
+Assert.assertThat(result.getId(), is(nonNullValue()));
+result = repository.findByEmailAddress("dave@dmband.com");
+Assert.assertThat(result, is(dave)); }
+}
+￼￼46
+|
+Chapter 4: JPA Repositories
+Using Spring Data Repositories
+To enable the Spring data repositories, we must make the repository interfaces discov- erable by the Spring Data repository infrastructure. We do so by letting our Customer Repository extend the Spring Data Repository marker interface. Beyond that, we keep the declared persistence methods we already have. See Example 4-13.
+Example 4-13. Spring Data CustomerRepository interface
+public interface CustomerRepository extends Repository<Customer, Long> { Customer save(Account account);
+Customer findByEmailAddress(String emailAddress); }
+The save(...) method will be backed by the generic SimpleJpaRepository class that im- plements all CRUD methods. The query method we declared will be backed by the generic query derivation mechanism, as described in “Query Derivation” on page 17. The only thing we now have to add to the Spring configuration is a way to activate the Spring Data repository infrastructure, which we can do in either XML or JavaConfig. For the JavaConfig way of configuration, all you need to do is add the @EnableJpaRepo sitories annotation to your configuration class. We remove the @ComponentScan an- notation be removed for our sample because we don’t need to look up the manual implementation anymore. The same applies to @EnableTransactionManagement. The Spring Data repository infrastructure will automatically take care of the method calls to repositories taking part in transactions. For more details on transaction configura- tion, see “Transactionality” on page 50. We’d probably still keep these annotations around were we building a more complete application. We remove them for now to prevent giving the impression that they are necessary for the sole data access setup. Finally, the header of the ApplicationConfig class looks something like Example 4-14.
+Example 4-14. Enabling Spring Data repositories using JavaConfig
+@Configuration @EnableJpaRepositories class ApplicationConfig {
+// ... as seen before
+}
+If you’re using XML configuration, add the repositories XML namespace element of the JPA namespace, as shown in Example 4-15.
+Example 4-15. Activating JPA repositories through the XML namespace
+<jpa:repositories base-package="com.acme.repositories" />
+￼￼Using Spring Data Repositories | 47
+To see this working, have a look at CustomerRepositoryIntegrationTest. It basically uses the Spring configuration set up in AbstractIntegrationTest, gets the CustomerRe pository wired into the test case, and runs the very same tests we find in JpaCustomer RepositoryIntegrationTest, only without us having to provide any implementation class for the repository interface whatsoever. Let’s look at the individual methods de- clared in the repository and recap what Spring Data JPA is actually doing for each one of them. See Example 4-16.
+Example 4-16. Repository interface definition for Customers
+public interface CustomerRepository extends Repository<Customer, Long> { Customer findOne(Long);
+Customer save(Customer account);
+Customer findByEmailAddress(EmailAddress emailAddress);
+}
+The findOne(...) and save(...) methods are actually backed by SimpleJpaRepository, which is the class of the instance that actually backs the proxy created by the Spring Data infrastructure. So, solely by matching the method signatures, the calls to these two methods get routed to the implementation class. If we wanted to expose a more complete set of CRUD methods, we might simply extend CrudRepository instead of Repository, as it contains these methods already. Note how we actually prevent Customer instances from being deleted by not exposing the delete(...) methods that would have been exposed if we had extended CrudRepository. Find out more about of the tuning options in “Fine-Tuning Repository Interfaces” on page 20.
+The last method to discuss is findByEmailAddress(...), which obviously is not a CRUD one but rather intended to be executed as a query. As we haven’t manually declared any, the bootstrapping purpose of Spring Data JPA will inspect the method and try to derive a query from it. The derivation mechanism (details on that in “Query Deriva- tion” on page 17) will discover that EmailAddress is a valid property reference for Customer and eventually create a JPA Criteria API query whose JPQL equivalent is select c from Customer c where c.emailAddress = ?1. Because the method returns a single Customer, the query execution expects the query to return at most one resulting entity. If no Customer is found, we’ll get null; if there’s more than one found, we’ll see a IncorrectResultSizeDataAccessException.
+Let’s continue with the ProductRepository interface (Example 4-17). The first thing you note is that compared to CustomerRepository, we’re extending CrudRepository first be- cause we’d like to have the full set of CRUD methods available. The method findByDe scriptionContaining(...) is clearly a query method. There are several things to note here. First, we not only reference the description property of the product, but also qualify the predicate with the Containing keyword. That will eventually lead to the given de- scription parameter being surrounded by % characters, and the resulting String being
+￼￼48 | Chapter 4: JPA Repositories
+bound via the LIKE operator. Thus, the query is as follows: select p from Product p where p.description like ?1 with a given description of Apple bound as %Apple%. The second interesting thing is that we’re using the pagination abstraction to retrieve only a subset of the products matching the criteria. The lookupProductsByDescription() test case in ProductRepositoryIntegrationTest shows how that method can be used (Ex- ample 4-18).
+Example 4-17. Repository interface definition for Products
+public interface ProductRepository extends CrudRepository<Product, Long> { Page<Product> findByDescriptionContaining(String description, Pageable pageable);
+@Query("select p from Product p where p.attributes[?1] = ?2")
+List<Product> findByAttributeAndValue(String attribute, String value); }
+Example 4-18. Test case for ProductRepository findByDescriptionContaining(...)
+@Test
+public void lookupProductsByDescription() {
+Pageable pageable = new PageRequest(0, 1, Direction.DESC, "name");
+Page<Product> page = repository.findByDescriptionContaining("Apple", pageable);
+assertThat(page.getContent(), hasSize(1));
+assertThat(page, Matchers.<Product> hasItems(named("iPad"))); assertThat(page.getTotalElements(), is(2L)); assertThat(page.isFirstPage(), is(true)); assertThat(page.isLastPage(), is(false)); assertThat(page.hasNextPage(), is(true));
+}
+We create a new PageRequest instance to ask for the very first page by specifying a page size of one with a descending order by the name of the Product. We then simply hand that Pageable into the method and make sure we’ve got the iPad back, that we’re the first page, and that there are further pages available. As you can see, the execution of the paging method retrieves the necessary metadata to find out how many items the query would have returned if we hadn’t applied pagination. Without Spring Data, reading that metadata would require manually coding the extra query execution, which does a count projection based on the actual query. For more detailed information on pagination with repository methods, see “Pagination and Sorting” on page 18.
+The second method in ProductRepository is findByAttributeAndValue(...). We’d essen- tially like to look up all Products that have a custom attribute with a given value. Because the attributes are mapped as @ElementCollection (see Example 4-5 for reference), we unfortunately cannot use the query derivation mechanism to get the query created for us. To manually define the query to be executed, we use the @Query annotation. This also comes in handy if the queries get more complex in general. Even if they were derivable, they’d result in awfully verbose method names.
+￼￼Using Spring Data Repositories | 49
+Finally, let’s have a look at the OrderRepository (Example 4-19), which should already look remarkably familiar. The query method findByCustomer(...) will trigger query der- ivation (as shown before) and result in select o from Order o where o.customer = ? 1. The only crucial difference from the other repositories is that we extend PagingAnd SortingRepository, which in turn extends CrudRepository. PagingAndSortingReposi tory adds findAll(...) methods that take a Sort and Pageable parameter on top of what CrudRepository already provides. The main use case here is that we’d like to access all Orders page by page to avoid loading them all at once.
+Example 4-19. Repository interface definition for Orders
+public interface OrderRepository extends PagingAndSortingRepository<Order, Long> {
+List<Order> findByCustomer(Customer customer); }
+Transactionality
+Some of the CRUD operations that will be executed against the JPA EntityManager require a transaction to be active. To make using Spring Data Repositories for JPA as convenient as possible, the implementation class backing CrudRepository and Paging AndSortingRepository is equipped with @Transactional annotations with a default configuration to let it take part in Spring transactions automatically, or even trigger new ones in case none is already active. For a general introduction into Spring trans- actions, please consult the Spring reference documentation.
+In case the repository implementation actually triggers the transaction, it will create a default one (store-default isolation level, no timeout configured, rollback for runtime exceptions only) for the save(...) and delete(...) operations and read-only ones for all find methods including the paged ones. Enabling read-only transactions for reading methods results in a few optimizations: first, the flag is handed to the underlying JDBC driver which will—depending on your database vendor—result in optimizations or the driver even preventing you from accidentally executing modifying queries. Beyond that, the Spring transaction infrastructure integrates with the life cycle of the EntityMan ager and can set the FlushMode for it to MANUAL, preventing it from checking each entity in the persistence context for changes (so-called dirty checking). Especially with a large set of objects loaded into the persistence context, this can lead to a significant im- provement in performance.
+If you’d like to fine-tune the transaction configuration for some of the CRUD methods (e.g., to configure a particular timeout), you can do so by redeclaring the desired CRUD method and adding @Transactional with your setup of choice to the method declara- tion. This will then take precedence over the default configuration declared in Sim pleJpaRepository. See Example 4-20.
+￼￼50 | Chapter 4: JPA Repositories
+Example 4-20. Reconfiguring transactionality in CustomerRepository interface
+public interface CustomerRepository extends Repository<Customer, Long> {
+@Transactional(timeout = 60)
+Customer save(Customer account); }
+This, of course, also works if you use custom repository base interfaces; see “Fine- Tuning Repository Interfaces” on page 20.
+Repository Querydsl Integration
+Now that we’ve seen how to add query methods to repository interfaces, let’s look at how we can use Querydsl to dynamically create predicates for entities and execute them via the repository abstraction. Chapter 3 provides a general introduction to what Querydsl actually is and how it works.
+To generate the metamodel classes, we have configured the Querydsl Maven plug-in in our pom.xml file, as shown in Example 4-21.
+Example 4-21. Setting up the Querydsl APT processor for JPA
+<plugin> <groupId>com.mysema.maven</groupId> <artifactId>maven-apt-plugin</artifactId> <version>1.0.4</version>
+<configuration>
+<processor>com.mysema.query.apt.jpa.JPAAnnotationProcessor</processor> </configuration>
+<executions>
+<execution>
+<id>sources</id> <phase>generate-sources</phase> <goals>
+<goal>process</goal> </goals>
+<configuration> <outputDirectory>target/generated-sources</outputDirectory>
+</configuration> </execution>
+</executions> </plugin>
+The only JPA-specific thing to note here is the usage of the JPAAnnotationProcessor. It will cause the plug-in to consider JPA mapping annotations to discover entities, rela- tionships to other entities, embeddables, etc. The generation will be run during the normal build process and classes generated into a folder under target. Thus, they will be cleaned up with each clean build, and don’t get checked into the source control system.
+￼￼Using Spring Data Repositories | 51
+If you’re using Eclipse and add the plug-in to your project setup, you will have to trigger a Maven project update (right-click on the project and choose Maven→Update Project...). This will add the configured output directory as an additional source folder so that the code using the generated classes compiles cleanly.
+Once this is in place, you should find the generated query classes QCustomer, QPro duct, and so on. Let’s explore the capabilities of the generated classes in the context of the ProductRepository. To be able to execute Querydsl predicates on the repository, we add the QueryDslPredicateExecutor interface to the list of extended types, as shown in Example 4-22.
+Example 4-22. The ProductRepository interface extending QueryDslPredicateExecutor
+public interface ProductRepository extends CrudRepository<Product, Long>, QueryDslPredicateExecutor<Product> { ... }
+ThiswillpullmethodslikefindAll(Predicate predicate)andfindOne(Predicate pred icate) into the API. We now have everything in place, so we can actually start using the generated classes. Let’s have a look at the QuerydslProductRepositoryIntegration Test (Example 4-23).
+Example 4-23. Using Querydsl predicates to query for Products
+QProduct product = QProduct.product;
+Product iPad = repository.findOne(product.name.eq("iPad"));
+Predicate tablets = product.description.contains("tablet");
+Iterable<Product> result = repository.findAll(tablets); assertThat(result, is(Matchers.<Product> iterableWithSize(1))); assertThat(result, hasItem(iPad));
+First, we obtain a reference to the QProduct metamodel class and keep that inside the product property. We can now use this to navigate the generated path expressions to create predicates. We use a product.name.eq("iPad") to query for the Product named iPad and keep that as a reference. The second predicate we build specifies that we’d like to look up all products with a description containing tablet. We then go on exe- cuting the Predicate instance against the repository and assert that we found exactly the iPad we looked up for reference before.
+You see that the definition of the predicates is remarkably readable and concise. The built predicates can be recombined to construct higher-level predicates and thus allow for querying flexibility without adding complexity.
+￼￼52 | Chapter 4: JPA Repositories
